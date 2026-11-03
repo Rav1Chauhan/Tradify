@@ -662,21 +662,99 @@ bot.catch((error, ctx) => {
 // 18. START BOT
 // ==========================================
 
-async function startBot(): Promise<void> {
-  try {
-    await bot.launch({
-      allowedUpdates: ["message", "callback_query"],
-    });
+// ==========================================
+// 18. HTTP SERVER + TELEGRAM WEBHOOK
+// ==========================================
 
-    console.log("🤖 Solana Wallet Bot started successfully!");
-    console.log(`🌐 Network: ${NETWORK}`);
-  } catch (error) {
-    console.error("❌ Failed to start bot:", error);
-    process.exit(1);
-  }
+const PORT = Number(process.env.PORT || 3000);
+const RENDER_EXTERNAL_URL = process.env.RENDER_EXTERNAL_URL;
+const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET;
+
+if (!RENDER_EXTERNAL_URL) {
+  throw new Error("RENDER_EXTERNAL_URL is missing");
 }
 
-startBot();
+if (!WEBHOOK_SECRET) {
+  throw new Error("WEBHOOK_SECRET is missing");
+}
+
+const webhookPath = `/telegram/${WEBHOOK_SECRET}`;
+const webhookUrl = `${RENDER_EXTERNAL_URL}${webhookPath}`;
+
+async function startBot(): Promise<void> {
+  const server = Bun.serve({
+    port: PORT,
+    hostname: "0.0.0.0",
+
+    async fetch(req) {
+      const url = new URL(req.url);
+
+      // Health check
+      if (req.method === "GET" && url.pathname === "/") {
+        return Response.json({
+          status: "online",
+          bot: "Tradify",
+          network: NETWORK,
+        });
+      }
+
+      // Telegram webhook
+      if (req.method === "POST" && url.pathname === webhookPath) {
+        const secret = req.headers.get("X-Telegram-Bot-Api-Secret-Token");
+
+        if (secret !== WEBHOOK_SECRET) {
+          return new Response("Unauthorized", { status: 401 });
+        }
+
+        try {
+          const update = (await req.json()) as Parameters<
+            typeof bot.handleUpdate
+          >[0];
+
+          await bot.handleUpdate(update);
+
+          return new Response("OK", { status: 200 });
+        } catch (error) {
+          console.error("Webhook processing error:", error);
+
+          return new Response("Internal Server Error", {
+            status: 500,
+          });
+        }
+      }
+
+      return new Response("Not Found", { status: 404 });
+    },
+  });
+
+  try {
+    await bot.telegram.setWebhook(webhookUrl, {
+      secret_token: WEBHOOK_SECRET,
+      allowed_updates: ["message", "callback_query"],
+    });
+
+    console.log("Tradify Telegram bot started!");
+    console.log(`Network: ${NETWORK}`);
+    console.log(`Webhook: ${RENDER_EXTERNAL_URL}`);
+    console.log(`HTTP server listening on port ${PORT}`);
+  } catch (error) {
+    await server.stop(true);
+    throw error;
+  }
+
+  process.once("SIGINT", () => {
+    void server.stop();
+  });
+
+  process.once("SIGTERM", () => {
+    void server.stop();
+  });
+}
+
+startBot().catch((error) => {
+  console.error("Failed to start Tradify:", error);
+  process.exit(1);
+});
 
 // Graceful shutdown
 
